@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stock Focus v7 + QR</title>
+    <link rel="manifest" href="manifest.json">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://unpkg.com/dexie/dist/dexie.js"></script>
+    <script src="https://unpkg.com/html5-qrcode"></script>
+    <style>
+        :root { --p: #2563eb; --bg: #f8fafc; --danger: #ef4444; --warn: #f59e0b; --success: #10b981; }
+        body { font-family: system-ui, sans-serif; background: var(--bg); margin: 0; padding: 10px; }
+        .card { max-width: 500px; margin: auto; background: white; padding: 20px; border-radius: 20px; box-shadow: 0 10px 25px rgba(0,0,0,0.05); }
+        .chart-box { width: 100%; height: 250px; position: relative; margin-bottom: 10px; }
+        .section { background: #f1f5f9; padding: 15px; border-radius: 15px; margin-bottom: 15px; }
+        label { font-size: 14px; font-weight: bold; color: #475569; }
+        input, select { width: 100%; padding: 12px; margin: 8px 0; border: 1.5px solid #cbd5e1; border-radius: 10px; font-size: 16px; box-sizing: border-box; }
+        .btn { width: 100%; padding: 14px; border-radius: 10px; border: none; font-weight: bold; cursor: pointer; font-size: 16px; margin-top: 10px; }
+        .btn-primary { background: var(--p); color: white; }
+        .btn-admin { background: #64748b; color: white; margin-top: 20px; }
+        #adminPanel { display: none; margin-top: 20px; border-top: 2px dashed #cbd5e1; padding-top: 20px; }
+        .qr-display { text-align: center; margin-top: 15px; display: none; background: white; padding: 15px; border-radius: 10px; }
+        .qr-display img { max-width: 150px; border: 1px solid #ddd; }
+    </style>
+</head>
+<body>
+
+<div class="card">
+    <h2 style="text-align:center; color:var(--p); margin-top:0;">📊 ตรวจสอบรายอุปกรณ์</h2>
+
+    <div class="chart-box">
+        <canvas id="singleItemChart"></canvas>
+    </div>
+    <div id="statusLabel" style="text-align:center; font-weight:bold; font-size:18px; margin-bottom:10px;">กรุณาเพิ่มสินค้าก่อน</div>
+
+    <div class="section">
+        <div id="reader"></div>
+        <button class="btn" style="background:#6366f1; color:white;" onclick="toggleScanner()">📷 สแกนบาร์โค้ด</button>
+        <select id="selectDevice" onchange="loadSingleData()"></select>
+        <input type="number" id="outQty" placeholder="จำนวนที่เบิก" inputmode="numeric">
+        <button class="btn btn-primary" onclick="doWithdraw()">💾 บันทึกการเบิก</button>
+    </div>
+
+    <button class="btn btn-admin" onclick="checkPass()">🔑 เมนูเจ้าหน้าที่ (Admin)</button>
+    
+    <div id="adminPanel" class="section" style="background:#e2e8f0;">
+        <h3>⚙️ ตั้งค่าสต็อกกลาง</h3>
+        <input type="text" id="mName" placeholder="ชื่ออุปกรณ์ (เช่น ปากกา)">
+        <input type="number" id="mQty" placeholder="จำนวนเริ่มต้น (100%)">
+        <button class="btn btn-primary" onclick="addMaster()">✅ บันทึก/อัปเดตสต็อก</button>
+        
+        <button class="btn" style="background:#f59e0b; color:white;" onclick="genQR()">🖼️ สร้าง QR Code สำหรับชิ้นนี้</button>
+        <div id="qrArea" class="qr-display">
+            <p style="font-size:12px; color:gray;">บันทึกรูปนี้ไปพิมพ์แปะที่สินค้า</p>
+            <div id="qrImgHolder"></div>
+            <p id="qrText" style="font-weight:bold;"></p>
+        </div>
+
+        <button class="btn" style="background:#059669; color:white; margin-top:20px;" onclick="exportExcel()">📊 โหลดรายงาน Excel</button>
+    </div>
+</div>
+
+<script>
+    const db = new Dexie("StockFocusDB_v7");
+    db.version(1).stores({ stock: 'name, total, current', logs: '++id, name, qty, time' });
+
+    let chartInstance = null;
+
+    function drawChart(name, current, total) {
+        const ctx = document.getElementById('singleItemChart').getContext('2d');
+        const missing = total - current;
+        const percent = (current / total) * 100;
+        let color = percent < 20 ? '#ef4444' : (percent < 50 ? '#f59e0b' : '#10b981');
+
+        if (chartInstance) chartInstance.destroy();
+        chartInstance = new Chart(ctx, {
+            type: 'doughnut',
+            data: {
+                labels: ['คงเหลือ', 'เบิกออก'],
+                datasets: [{ data: [current, missing], backgroundColor: [color, '#e2e8f0'], borderWidth: 0 }]
+            },
+            options: { responsive: true, maintainAspectRatio: false, cutout: '75%', plugins: { legend: { position: 'bottom' } } }
+        });
+        document.getElementById('statusLabel').innerHTML = `<span style="color:${color}">${name}</span><br><small style="color:gray;">${current} / ${total}</small>`;
+    }
+
+    async function loadSingleData() {
+        const name = document.getElementById('selectDevice').value;
+        if (!name) return;
+        const item = await db.stock.get(name);
+        if (item) drawChart(item.name, item.current, item.total);
+    }
+
+    async function doWithdraw() {
+        const name = document.getElementById('selectDevice').value;
+        const qty = Number(document.getElementById('outQty').value);
+        if (!name || qty <= 0) return alert("ระบุจำนวน");
+        const item = await db.stock.get(name);
+        if (item.current < qty) return alert("ของไม่พอ!");
+        await db.stock.update(name, { current: item.current - qty });
+        await db.logs.add({ name, qty, time: new Date().toLocaleString('th-TH') });
+        document.getElementById('outQty').value = '';
+        loadSingleData(); 
+    }
+
+    async function addMaster() {
+        const name = document.getElementById('mName').value.trim();
+        const qty = Number(document.getElementById('mQty').value);
+        if (!name || !qty) return alert("ใส่ชื่อและจำนวน");
+        await db.stock.put({ name, total: qty, current: qty });
+        initUI();
+        alert("บันทึกสำเร็จ! ตอนนี้คุณสามารถกดสร้าง QR Code ได้");
+    }
+
+    // ฟังก์ชันสร้าง QR Code
+    function genQR() {
+        const name = document.getElementById('mName').value.trim();
+        if (!name) return alert("กรุณาใส่ชื่ออุปกรณ์ก่อนสร้าง QR");
+        const url = `https://quickchart.io/qr?text=${encodeURIComponent(name)}&size=200`;
+        document.getElementById('qrImgHolder').innerHTML = `<img src="${url}" alt="QR">`;
+        document.getElementById('qrText').innerText = name;
+        document.getElementById('qrArea').style.display = 'block';
+    }
+
+    async function initUI() {
+        const stocks = await db.stock.toArray();
+        const select = document.getElementById('selectDevice');
+        select.innerHTML = stocks.map(s => `<option value="${s.name}">${s.name}</option>`).join('');
+        if (stocks.length > 0) loadSingleData();
+    }
+
+    function checkPass() {
+        if (prompt("รหัสผ่าน:") === "1234") document.getElementById('adminPanel').style.display = 'block';
+    }
+
+    let html5QrCode;
+    function toggleScanner() {
+        if (!html5QrCode) {
+            html5QrCode = new Html5Qrcode("reader");
+            html5QrCode.start({ facingMode: "environment" }, { fps: 10, qrbox: 250 }, (text) => {
+                const select = document.getElementById('selectDevice');
+                if ([...select.options].some(o => o.value === text)) {
+                    select.value = text;
+                    loadSingleData();
+                    html5QrCode.stop().then(()=> html5QrCode = null);
+                } else { alert("ไม่พบชื่ออุปกรณ์นี้ในระบบ: " + text); }
+            });
+        }
+    }
+
+    async function exportExcel() {
+        const stocks = await db.stock.toArray();
+        let csv = "\uFEFFชื่ออุปกรณ์,คงเหลือ,จำนวนเต็ม,ยอดขาด,%\n";
+        stocks.forEach(s => csv += `${s.name},${s.current},${s.total},${s.total-s.current},${((s.current/s.total)*100).toFixed(2)}%\n`);
+        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = "Report.csv";
+        a.click();
+    }
+
+    initUI();
+</script>
+</body>
+</html>
